@@ -1,0 +1,278 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  DrainProof - Smart Community Drainage Monitoring & Resolution Verification System
+  AWS Serverless Application Model (SAM) Specification
+
+Globals:
+  Function:
+    Timeout: 15
+    MemorySize: 256
+    Runtime: python3.12
+    Tracing: Active
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref DrainReportsTable
+        BUCKET_NAME: !Ref EvidenceBucket
+
+Resources:
+  # ========================================================
+  # Amazon S3 - Evidence Storage Bucket
+  # ========================================================
+  EvidenceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "drainproof-evidence-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - PUT
+              - HEAD
+            AllowedOrigins:
+              - '*'
+            MaxAge: 3600
+
+  # ========================================================
+  # Amazon DynamoDB - Reports Table
+  # ========================================================
+  DrainReportsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: DrainReports
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: report_id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: report_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: StatusIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # ========================================================
+  # Amazon API Gateway - HTTP API
+  # ========================================================
+  DrainProofApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Name: DrainProofHttpApi
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowHeaders:
+          - '*'
+        AllowMethods:
+          - '*'
+        MaxAge: 600
+
+  # ========================================================
+  # Lambda Functions
+  # ========================================================
+  CreateReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/functions/create_report/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DrainReportsTable
+      Events:
+        CreateReport:
+          Type: HttpApi
+          Properties:
+            Path: /reports
+            Method: post
+            ApiId: !Ref DrainProofApi
+
+  GenerateUploadUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/functions/generate_upload_url/
+      Handler: app.lambda_handler
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Sub "drainproof-evidence-${AWS::AccountId}-${AWS::Region}"
+        - DynamoDBReadPolicy:
+            TableName: !Ref DrainReportsTable
+      Events:
+        GenerateUploadUrl:
+          Type: HttpApi
+          Properties:
+            Path: /reports/{id}/upload-url
+            Method: post
+            ApiId: !Ref DrainProofApi
+
+  SubmitReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/functions/submit_report/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref DrainProofStateMachine
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DrainReportsTable
+        - S3ReadPolicy:
+            BucketName: !Sub "drainproof-evidence-${AWS::AccountId}-${AWS::Region}"
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt DrainProofStateMachine.Name
+      Events:
+        SubmitReport:
+          Type: HttpApi
+          Properties:
+            Path: /reports/{id}/submit
+            Method: post
+            ApiId: !Ref DrainProofApi
+
+  GetReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/functions/get_report/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DrainReportsTable
+        - S3ReadPolicy:
+            BucketName: !Sub "drainproof-evidence-${AWS::AccountId}-${AWS::Region}"
+      Events:
+        GetReportById:
+          Type: HttpApi
+          Properties:
+            Path: /reports/{id}
+            Method: get
+            ApiId: !Ref DrainProofApi
+        ListReports:
+          Type: HttpApi
+          Properties:
+            Path: /reports
+            Method: get
+            ApiId: !Ref DrainProofApi
+
+  UpdateStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/functions/update_status/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DrainReportsTable
+      Events:
+        UpdateStatus:
+          Type: HttpApi
+          Properties:
+            Path: /reports/{id}/status
+            Method: patch
+            ApiId: !Ref DrainProofApi
+
+  SubmitResolutionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/functions/submit_resolution/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DrainReportsTable
+        - S3WritePolicy:
+            BucketName: !Sub "drainproof-evidence-${AWS::AccountId}-${AWS::Region}"
+        - S3ReadPolicy:
+            BucketName: !Sub "drainproof-evidence-${AWS::AccountId}-${AWS::Region}"
+      Events:
+        SubmitResolution:
+          Type: HttpApi
+          Properties:
+            Path: /reports/{id}/resolution
+            Method: post
+            ApiId: !Ref DrainProofApi
+        VerifyResolution:
+          Type: HttpApi
+          Properties:
+            Path: /reports/{id}/verify-resolution
+            Method: post
+            ApiId: !Ref DrainProofApi
+
+  # Internal Workflow Task Functions
+  ValidateReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/functions/validate_report/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DrainReportsTable
+        - S3ReadPolicy:
+            BucketName: !Sub "drainproof-evidence-${AWS::AccountId}-${AWS::Region}"
+
+  CalculatePriorityFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/functions/calculate_priority/
+      Handler: app.lambda_handler
+
+  DetectDuplicatesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/functions/detect_duplicates/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DrainReportsTable
+
+  # ========================================================
+  # AWS Step Functions - Workflow Orchestrator
+  # ========================================================
+  DrainProofStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: step-functions/report_workflow.asl.json
+      DefinitionSubstitutions:
+        ValidateReportFunctionArn: !GetAtt ValidateReportFunction.Arn
+        CalculatePriorityFunctionArn: !GetAtt CalculatePriorityFunction.Arn
+        DetectDuplicatesFunctionArn: !GetAtt DetectDuplicatesFunction.Arn
+        UpdateStatusFunctionArn: !GetAtt UpdateStatusFunction.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ValidateReportFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CalculatePriorityFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref DetectDuplicatesFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref UpdateStatusFunction
+
+Outputs:
+  HttpApiUrl:
+    Description: "HTTP API Gateway endpoint URL"
+    Value: !Sub "https://${DrainProofApi}.execute-api.${AWS::Region}.amazonaws.com"
+  EvidenceBucketName:
+    Description: "S3 Bucket Name for Evidence Storage"
+    Value: !Ref EvidenceBucket
+  DynamoDBTableName:
+    Description: "DynamoDB Table Name"
+    Value: !Ref DrainReportsTable
+  StateMachineArn:
+    Description: "Step Functions State Machine ARN"
+    Value: !Ref DrainProofStateMachine

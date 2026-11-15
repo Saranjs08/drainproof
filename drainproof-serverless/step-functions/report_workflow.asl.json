@@ -1,0 +1,110 @@
+{
+  "Comment": "DrainProof Report Processing Workflow",
+  "StartAt": "ValidateReportAndImage",
+  "States": {
+    "ValidateReportAndImage": {
+      "Type": "Task",
+      "Resource": "${ValidateReportFunctionArn}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "HandleProcessingFailure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "CalculatePriority"
+    },
+    "CalculatePriority": {
+      "Type": "Task",
+      "Resource": "${CalculatePriorityFunctionArn}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "HandleProcessingFailure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "FindPotentialDuplicates"
+    },
+    "FindPotentialDuplicates": {
+      "Type": "Task",
+      "Resource": "${DetectDuplicatesFunctionArn}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "HandleProcessingFailure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "PersistProcessingResults"
+    },
+    "PersistProcessingResults": {
+      "Type": "Task",
+      "Resource": "${UpdateStatusFunctionArn}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "HandleProcessingFailure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "WorkflowSuccess"
+    },
+    "WorkflowSuccess": {
+      "Type": "Succeed"
+    },
+    "HandleProcessingFailure": {
+      "Type": "Fail",
+      "Cause": "Report workflow execution encountered an error during automated processing",
+      "Error": "ReportProcessingFailed"
+    }
+  }
+}
